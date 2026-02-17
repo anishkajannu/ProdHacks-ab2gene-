@@ -1,34 +1,30 @@
 import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
+import Layout from './components/layout/Layout'
+import ProfileView from './components/pages/ProfileView'
+import SearchView from './components/pages/SearchView'
+import WorkspaceView from './components/pages/WorkspaceView'
 import './App.css'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [activeView, setActiveView] = useState('profile')
+
+  const renderView = () => {
+    switch (activeView) {
+      case 'profile':
+        return <ProfileView />
+      case 'search':
+        return <SearchView />
+      case 'workspace':
+        return <WorkspaceView />
+      default:
+        return <ProfileView />
+    }
+  }
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
+    <Layout activeView={activeView} onNavigate={setActiveView}>
+      {renderView()}
+    </Layout>
   )
 }
 
