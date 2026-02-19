@@ -1,13 +1,19 @@
 import { useState } from 'react';
-import { searchOpportunities, getOpportunityUrl, type GrantsGovOpportunity } from '../../api/grantsGov';
+import { searchOpportunities, getOpportunityUrl, buildGrantContext, type GrantsGovOpportunity } from '../../api/grantsGov';
+import GrantChat from '../chat/GrantChat';
 import './EmptyState.css';
 import './SearchView.css';
 
-export default function SearchView() {
+interface SearchViewProps {
+  organizationProfile?: string;
+}
+
+export default function SearchView({ organizationProfile = '' }: SearchViewProps) {
   const [query, setQuery] = useState('education');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [opportunities, setOpportunities] = useState<GrantsGovOpportunity[]>([]);
+  const [selectedOpportunity, setSelectedOpportunity] = useState<GrantsGovOpportunity | null>(null);
 
   const handleSearch = async () => {
     setLoading(true);
@@ -61,6 +67,24 @@ export default function SearchView() {
         </div>
       )}
 
+      {selectedOpportunity && (
+        <div
+          className="search-chat-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => e.target === e.currentTarget && setSelectedOpportunity(null)}
+        >
+          <div className="search-chat-wrap" onClick={(e) => e.stopPropagation()}>
+            <GrantChat
+              grantTitle={selectedOpportunity.opportunity_title}
+              grantContext={buildGrantContext(selectedOpportunity)}
+              profileContext={organizationProfile}
+              onClose={() => setSelectedOpportunity(null)}
+            />
+          </div>
+        </div>
+      )}
+
       {opportunities.length > 0 && (
         <div className="search-results">
           <h3 className="search-results-title">Found {opportunities.length} opportunities</h3>
@@ -86,6 +110,17 @@ export default function SearchView() {
                   ) : (
                     content
                   )}
+                  <button
+                    type="button"
+                    className="opportunity-ask-btn"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setSelectedOpportunity(opp);
+                    }}
+                  >
+                    Ask about this grant
+                  </button>
                 </li>
               );
             })}

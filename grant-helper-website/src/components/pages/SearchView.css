@@ -116,6 +116,42 @@
   text-decoration: underline;
 }
 
+.opportunity-ask-btn {
+  display: block;
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #6366f1;
+  background: transparent;
+  border: 1px solid #6366f1;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.opportunity-ask-btn:hover {
+  background: #6366f1;
+  color: #fff;
+}
+
+.search-chat-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+}
+
+.search-chat-overlay .grant-chat {
+  max-height: 85vh;
+}
+
 @media (prefers-color-scheme: dark) {
   .search-input {
     background: #1f2937;

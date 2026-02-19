@@ -7,17 +7,28 @@ import './App.css'
 
 function App() {
   const [activeView, setActiveView] = useState('profile')
+  const [organizationProfile, setOrganizationProfile] = useState('')
 
   const renderView = () => {
     switch (activeView) {
       case 'profile':
-        return <ProfileView />
+        return (
+          <ProfileView
+            organizationProfile={organizationProfile}
+            onOrganizationProfileChange={setOrganizationProfile}
+          />
+        )
       case 'search':
-        return <SearchView />
+        return <SearchView organizationProfile={organizationProfile} />
       case 'workspace':
         return <WorkspaceView />
       default:
-        return <ProfileView />
+        return (
+          <ProfileView
+            organizationProfile={organizationProfile}
+            onOrganizationProfileChange={setOrganizationProfile}
+          />
+        )
     }
   }
 

@@ -30,6 +30,30 @@ export function getOpportunityUrl(opp: GrantsGovOpportunity): string | null {
   return id ? `${OPPORTUNITY_VIEW_BASE}/${id}` : null;
 }
 
+/** Build a plain-text context string for RAG from an opportunity (search result or full GET). */
+export function buildGrantContext(opp: GrantsGovOpportunity): string {
+  const s = opp.summary as Record<string, unknown> | undefined;
+  const postDate = s?.post_date ?? (opp as Record<string, unknown>).post_date;
+  const closeDate = s?.close_date ?? (opp as Record<string, unknown>).close_date;
+  const ceiling = s?.award_ceiling ?? (opp as Record<string, unknown>).award_ceiling;
+  const floor = s?.award_floor ?? (opp as Record<string, unknown>).award_floor;
+  const summaryDesc = s?.summary_description ?? (opp as Record<string, unknown>).summary_description;
+  const parts: string[] = [
+    `Title: ${opp.opportunity_title ?? ''}`,
+    opp.opportunity_number ? `Opportunity Number: ${opp.opportunity_number}` : '',
+    (opp as Record<string, unknown>).agency_name ? `Agency: ${(opp as Record<string, unknown>).agency_name}` : '',
+    postDate ? `Posted: ${postDate}` : '',
+    closeDate ? `Close Date: ${closeDate}` : '',
+    ceiling != null ? `Award Ceiling: ${ceiling}` : '',
+    floor != null ? `Award Floor: ${floor}` : '',
+    Array.isArray((opp as Record<string, unknown>).applicant_types)
+      ? `Applicant Types: ${((opp as Record<string, unknown>).applicant_types as string[]).join(', ')}`
+      : '',
+    summaryDesc ? `Summary: ${summaryDesc}` : '',
+  ].filter(Boolean);
+  return parts.join('\n');
+}
+
 /** Response from the search endpoint */
 export interface SearchOpportunitiesResponse {
   data: GrantsGovOpportunity[];
@@ -124,4 +148,25 @@ export async function searchOpportunities(
 
   const data = (await response.json()) as SearchOpportunitiesResponse;
   return data;
+}
+
+/**
+ * Fetch full opportunity details by ID (for RAG context).
+ * GET /v1/opportunities/{opportunity_id}
+ */
+export async function getOpportunityById(opportunityId: string): Promise<GrantsGovOpportunity> {
+  const response = await fetch(`${BASE_URL}/v1/opportunities/${encodeURIComponent(opportunityId)}`, {
+    method: 'GET',
+    headers: {
+      'X-API-Key': getApiKey(),
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Grants.gov API error: ${response.status} ${response.statusText}. ${text}`);
+  }
+
+  return (await response.json()) as GrantsGovOpportunity;
 }

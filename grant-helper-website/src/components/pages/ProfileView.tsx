@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import { extractDocuments } from '../../api/extractDocuments';
 import './EmptyState.css';
 import './ProfileView.css';
 
@@ -33,10 +34,20 @@ const SUGGESTED_DOCS = [
   { icon: '💼', label: 'Strategic Plan' },
 ];
 
-export default function ProfileView() {
+interface ProfileViewProps {
+  organizationProfile: string;
+  onOrganizationProfileChange: (value: string) => void;
+}
+
+export default function ProfileView({
+  organizationProfile,
+  onOrganizationProfileChange,
+}: ProfileViewProps) {
   const [showUpload, setShowUpload] = useState(false);
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = useCallback((incoming: FileList | File[]) => {
@@ -204,11 +215,33 @@ export default function ProfileView() {
           </ul>
 
           <div className="upload-actions">
-            <button className="btn-primary upload-submit">
-              ✨ Analyze with AI
+            <button
+              type="button"
+              className="btn-primary upload-submit"
+              disabled={extracting}
+              onClick={async () => {
+                setExtractError(null);
+                setExtracting(true);
+                try {
+                  const { text } = await extractDocuments(files.map((f) => f.file));
+                  onOrganizationProfileChange(text);
+                  setShowUpload(false);
+                } catch (err) {
+                  setExtractError(err instanceof Error ? err.message : 'Failed to extract text from documents');
+                } finally {
+                  setExtracting(false);
+                }
+              }}
+            >
+              {extracting ? 'Extracting…' : '✨ Analyze with AI'}
             </button>
+            {extractError && (
+              <p className="upload-error" role="alert">
+                {extractError}
+              </p>
+            )}
             <p className="upload-hint">
-              Our AI will extract your organization's details to personalize your grant search.
+              We'll extract text from your documents to personalize grant search and chat.
             </p>
           </div>
         </div>
