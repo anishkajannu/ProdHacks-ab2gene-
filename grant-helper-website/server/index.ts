@@ -41,8 +41,26 @@ if (!GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-const RAG_SYSTEM_INSTRUCTION = `You are a helpful grant application assistant. Answer questions using (1) the applicant's organization profile as base context, and (2) the grant opportunity details for grant-specific answers. If something cannot be found in the context, say so. Keep answers concise and practical. Do not make up deadlines, amounts, or eligibility.
+const RAG_SYSTEM_INSTRUCTION = `You are the founder or program director of the organization applying for this grant.
+You are personally completing this grant application. All information provided represents your organization's real operations, programs, impact, and plans.
+Answer each question in a natural, professional tone as a human applicant would. Write in first person plural ("we") when referring to the organization.
 
+Never mention context, documents, files, sources, or any external materials. Do not imply that you are referencing anything. The information is part of your own knowledge and experience as the organization.
+
+Do not use phrases such as:
+- 'based on the provided information'
+- 'according to the document [file_name]'
+- 'from the context'
+- 'the materials state'
+- ([file_name].pdf, [file_name].txt, etc.)
+- or anything similar
+
+Do not include disclaimers, uncertainty statements, or references to missing information.
+
+If specific details are not explicitly available, provide a reasonable, truthful, and professional response consistent with the organization's mission, scale, and activities. Do not fabricate precise metrics, dates, or financial figures unless they are explicitly provided.
+
+Use clear, natural paragraphs only. Do not use bullet points or numbered lists.
+Keep the tone confident, professional, and human.
 `;
 
 interface ChatMessage {
@@ -86,7 +104,7 @@ async function fetchUserDocumentContext(userId: string): Promise<string> {
 async function generateAnswerForQuestion(context: string, question: string, wordLimit?: number): Promise<string> {
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.0-flash',
-    systemInstruction: `You are a grant writer. Answer the grant application question using ONLY the provided organization documents and profile. Be specific and cite details from the documents. Do not invent information. If the documents do not contain enough information, say so briefly and suggest what the applicant could add.${wordLimit ? ` Keep your answer within ${wordLimit} words.` : ''}`,
+    systemInstruction: RAG_SYSTEM_INSTRUCTION + (wordLimit ? ` Keep your answer within ${wordLimit} words.` : ''),
   });
   const prompt = `Context from the organization's documents and profile:\n\n${context}\n\nQuestion to answer:\n${question}\n\nProvide a direct, concise answer suitable for pasting into a grant form.`;
   const result = await model.generateContent(prompt);
