@@ -18,8 +18,9 @@ import mammoth from 'mammoth';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const pdfParseModule = require('pdf-parse');
-const pdfParse = (pdfParseModule.default || pdfParseModule) as (buffer: Buffer) => Promise<{ text: string }>;
+// pdf-parse is a CommonJS module, import as namespace
+import * as pdfParseModule from 'pdf-parse';
+const pdfParse = (pdfParseModule as any) as (buffer: Buffer) => Promise<{ text: string }>;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
