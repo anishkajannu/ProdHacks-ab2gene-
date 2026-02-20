@@ -36,11 +36,11 @@ function getSupabase(): SupabaseClient {
       signOut: async () => ({ error: null }),
       signUp: async () => ({ data: null, error: new Error('Supabase not configured') }),
     },
-    storage: {} as any,
-    from: () => ({} as any),
-    rpc: () => ({} as any),
-    rest: {} as any,
-    realtime: {} as any,
+    storage: {} as SupabaseClient['storage'],
+    from: () => ({} as ReturnType<SupabaseClient['from']>),
+    rpc: () => ({} as ReturnType<SupabaseClient['rpc']>),
+    rest: {} as SupabaseClient['rest'],
+    realtime: {} as SupabaseClient['realtime'],
     removeChannel: () => ({}),
     getChannels: () => ([]),
     channel: () => ({} as any),
@@ -59,14 +59,28 @@ export async function uploadToSupabase(file: File, userId: string): Promise<stri
   const documentId = crypto.randomUUID();
   const storagePath = `${userId}/${documentId}/${file.name}`;
 
+  console.log(storagePath);
+  console.log(file);
+
   // Upload to Storage
   const { error: uploadError } = await supabase.storage
     .from('user-docs')
     .upload(storagePath, file);
 
-  if (uploadError) throw uploadError;
+  if (uploadError){
+    console.error('Error uploading file to Supabase Storage:', uploadError);
+    throw uploadError;
+  }
+  // Insert metadata into documents table (id is auto-generated)
 
-  // Insert metadata into documents table
+  console.log({
+    user_id: userId,
+    filename: file.name,
+    mime_type: file.type,
+    storage_path: storagePath,
+    file_size_bytes: file.size,
+    status: 'uploaded',
+  });
   const { error: dbError } = await supabase.from('documents').insert({
     user_id: userId,
     filename: file.name,
@@ -76,7 +90,9 @@ export async function uploadToSupabase(file: File, userId: string): Promise<stri
     status: 'uploaded',
   });
 
-  if (dbError) throw dbError;
+  if (dbError){
+    throw dbError;
+  }
 
   return storagePath;
 }

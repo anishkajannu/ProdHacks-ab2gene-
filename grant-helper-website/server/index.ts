@@ -1,10 +1,10 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
+// import { createRequire } from 'module';
 import dotenv from 'dotenv';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+// const require = createRequire(import.meta.url);
 // Load .env from project root (cwd when run via "npm run dev:server"), then try next to server/
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 if (!process.env.GEMINI_API_KEY) {
@@ -18,14 +18,11 @@ import mammoth from 'mammoth';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// PDF parsing disabled for demo - use TXT or DOC files instead
-// const pdfParse = require('pdf-parse');
-
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
 let supabaseAdmin: SupabaseClient | null = null;
-if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
-  supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+  supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
 
 const app = express();
@@ -97,13 +94,34 @@ async function generateAnswerForQuestion(context: string, question: string, word
   return (text ?? '').trim();
 }
 
+/** Extract text from PDF using pdfjs-dist directly (avoids Buffer vs Uint8Array issues in pdf-parse). */
+async function extractTextFromPdf(buffer: Buffer): Promise<string> {
+  const data = Uint8Array.from(buffer);
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const loadingTask = pdfjs.getDocument({ data });
+  const doc = await loadingTask.promise;
+  const numPages = doc.numPages;
+  const parts: string[] = [];
+  for (let i = 1; i <= numPages; i++) {
+    const page = await doc.getPage(i);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items
+      .map((item) => ('str' in item ? String(item.str ?? '') : ''))
+      .join(' ');
+    parts.push(pageText);
+    page.cleanup();
+  }
+  await doc.destroy();
+  return parts.join('\n\n');
+}
+
 async function extractTextFromFile(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
+
   if (mimeType === 'text/plain') {
     return buffer.toString('utf-8');
   }
   if (mimeType === 'application/pdf') {
-    // PDF parsing temporarily disabled - use TXT or DOC files for demo
-    return '[PDF parsing is currently unavailable. Please use TXT or DOC/DOCX files instead.]';
+    return await extractTextFromPdf(buffer);
   }
   if (
     mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
