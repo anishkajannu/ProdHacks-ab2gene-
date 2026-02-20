@@ -16,8 +16,16 @@ import cors from 'cors';
 import multer from 'multer';
 import mammoth from 'mammoth';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const pdfParse = require('pdf-parse') as (buffer: Buffer) => Promise<{ text: string }>;
+
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+let supabaseAdmin: SupabaseClient | null = null;
+if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+  supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+}
 
 const app = express();
 app.use(cors());
@@ -57,6 +65,35 @@ function buildSystemInstruction(profileContext: string, grantContext: string): s
   }
   out += `Grant opportunity (use for deadlines, eligibility, amounts, etc.):\n${grantContext}`;
   return out;
+}
+
+/** Fetch combined text from document_chunks for a user (Supabase). Returns empty string if not configured or no data. */
+async function fetchUserDocumentContext(userId: string): Promise<string> {
+  if (!supabaseAdmin || !userId?.trim()) return '';
+  const { data, error } = await supabaseAdmin
+    .from('document_chunks')
+    .select('content, document_id, chunk_index')
+    .eq('user_id', userId)
+    .order('document_id', { ascending: true })
+    .order('chunk_index', { ascending: true });
+  if (error) {
+    console.warn('Supabase document_chunks fetch failed:', error.message);
+    return '';
+  }
+  if (!data?.length) return '';
+  return data.map((r) => r.content).filter(Boolean).join('\n\n');
+}
+
+/** Generate one grant-application answer using Gemini from context and question. */
+async function generateAnswerForQuestion(context: string, question: string, wordLimit?: number): Promise<string> {
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.0-flash',
+    systemInstruction: `You are a grant writer. Answer the grant application question using ONLY the provided organization documents and profile. Be specific and cite details from the documents. Do not invent information. If the documents do not contain enough information, say so briefly and suggest what the applicant could add.${wordLimit ? ` Keep your answer within ${wordLimit} words.` : ''}`,
+  });
+  const prompt = `Context from the organization's documents and profile:\n\n${context}\n\nQuestion to answer:\n${question}\n\nProvide a direct, concise answer suitable for pasting into a grant form.`;
+  const result = await model.generateContent(prompt);
+  const text = result.response.text();
+  return (text ?? '').trim();
 }
 
 async function extractTextFromFile(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
@@ -154,6 +191,111 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     console.error('Chat error:', err);
     res.status(status === 429 ? 429 : 500).json({ error: message });
   }
+});
+
+/** POST /api/google-form/prefill
+ * Body: { formId, organizationProfile?, entryIds, questions?, userId? }
+ * - entryIds: maps field names to Google Form entry IDs (e.g. "impact" -> "entry.216607139" or "216607139").
+ * - questions: optional Record<fieldName, questionText>. If provided, answers are generated with Gemini using
+ *   context = organizationProfile + (if userId) document_chunks from Supabase; then URLSearchParams are filled.
+ * - userId: optional; when set and Supabase is configured, document_chunks for this user are used as context.
+ * Returns: { url: string, answers?: Record<string, string> } — pre-fill URL and optionally the generated answers.
+ */
+interface GoogleFormPrefillBody {
+  formId?: string;
+  organizationProfile?: string;
+  entryIds?: Record<string, string>;
+  questions?: Record<string, string>;
+  userId?: string;
+}
+
+function normalizeEntryKey(entryId: string): string {
+  const t = entryId.trim();
+  return t.startsWith('entry.') ? t : `entry.${t}`;
+}
+
+app.post('/api/google-form/prefill', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { formId, organizationProfile = '', entryIds = {}, questions = {}, userId } = req.body as GoogleFormPrefillBody;
+    if (!formId || typeof formId !== 'string') {
+      res.status(400).json({ error: 'formId is required and must be a string' });
+      return;
+    }
+
+    let context = organizationProfile.trim();
+    if (userId?.trim() && supabaseAdmin) {
+      const docContext = await fetchUserDocumentContext(userId);
+      if (docContext) context = (context ? context + '\n\n--- Documents from Supabase ---\n\n' : '') + docContext;
+    }
+    if (!context && Object.keys(questions).length > 0) {
+      res.status(400).json({ error: 'Provide organizationProfile or a userId with documents in Supabase to generate answers.' });
+      return;
+    }
+
+    const answers: Record<string, string> = {};
+    if (Object.keys(questions).length > 0 && context) {
+      for (const [field, questionText] of Object.entries(questions)) {
+        if (!questionText?.trim()) continue;
+        const wordMatch = questionText.match(/Max\s+(\d+)\s+words/i);
+        const wordLimit = wordMatch ? parseInt(wordMatch[1], 10) : undefined;
+        const answer = await generateAnswerForQuestion(context, questionText, wordLimit);
+        answers[field] = answer;
+      }
+    }
+
+    const base = `https://docs.google.com/forms/d/e/${formId.trim()}/viewform`;
+    const params = new URLSearchParams();
+    params.set('usp', 'pp_url');
+
+    for (const [field, entryId] of Object.entries(entryIds)) {
+      if (!entryId?.trim()) continue;
+      const key = normalizeEntryKey(entryId);
+      const value = answers[field] ?? (typeof (req.body as Record<string, unknown>)[field] === 'string' ? (req.body as Record<string, unknown>)[field] as string : field === 'profile' ? organizationProfile : '');
+      if (value) params.set(key, value);
+    }
+
+    const url = `${base}?${params.toString()}`;
+    res.json({ url, ...(Object.keys(answers).length > 0 ? { answers } : {}) });
+  } catch (err) {
+    console.error('Google Form prefill error:', err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to build prefill URL',
+    });
+  }
+});
+
+/** GET /api/google-form/prefill-url
+ * Query: formId, entryIds as JSON string or entry.XXX=value.
+ * Redirects to the Google Form pre-fill URL (uses GET as requested).
+ */
+app.get('/api/google-form/prefill-url', (req: Request, res: Response): void => {
+  const formId = typeof req.query.formId === 'string' ? req.query.formId.trim() : '';
+  const organizationProfile = typeof req.query.profile === 'string' ? req.query.profile : '';
+  if (!formId) {
+    res.status(400).send('formId query parameter is required');
+    return;
+  }
+  const base = `https://docs.google.com/forms/d/e/${formId}/viewform`;
+  const params = new URLSearchParams();
+  params.set('usp', 'pp_url');
+  const entryIdsJson = req.query.entryIds;
+  if (typeof entryIdsJson === 'string') {
+    try {
+      const entryIds = JSON.parse(entryIdsJson) as Record<string, string>;
+      if (entryIds.profile && organizationProfile) {
+        params.set(`entry.${entryIds.profile}`, organizationProfile);
+      }
+      for (const [key, entryId] of Object.entries(entryIds)) {
+        if (key !== 'profile' && entryId && req.query[key] !== undefined) {
+          params.set(`entry.${entryId}`, String(req.query[key]));
+        }
+      }
+    } catch {
+      // ignore invalid JSON
+    }
+  }
+  const url = `${base}?${params.toString()}`;
+  res.redirect(302, url);
 });
 
 const PORT = Number(process.env.PORT) || 3001;

@@ -21,7 +21,7 @@ function App() {
       case 'search':
         return <SearchView organizationProfile={organizationProfile} />
       case 'workspace':
-        return <WorkspaceView />
+        return <WorkspaceView organizationProfile={organizationProfile} />
       default:
         return (
           <ProfileView

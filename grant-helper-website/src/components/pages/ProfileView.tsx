@@ -39,9 +39,7 @@ interface ProfileViewProps {
   onOrganizationProfileChange: (value: string) => void;
 }
 
-export default function ProfileView({
-  organizationProfile,
-  onOrganizationProfileChange,
+export default function ProfileView({onOrganizationProfileChange,
 }: ProfileViewProps) {
   const [showUpload, setShowUpload] = useState(false);
   const [files, setFiles] = useState<UploadedFile[]>([]);

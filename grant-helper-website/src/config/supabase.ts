@@ -12,7 +12,7 @@
  * 5. Replace src/api/extractDocuments.ts with uploadToSupabase() calls
  */
 
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 // These would be set in production .env:
 // VITE_SUPABASE_URL=https://your-project.supabase.co
@@ -21,7 +21,33 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// createClient() throws if URL is empty, so only create when configured (avoids blank screen when .env is missing)
+function getSupabase(): SupabaseClient {
+  if (supabaseUrl && supabaseAnonKey) {
+    return createClient(supabaseUrl, supabaseAnonKey);
+  }
+  // Return a dummy that satisfies auth.getSession() so WorkspaceView etc. don't crash
+  return {
+    auth: {
+      getSession: () => Promise.resolve({ data: { session: null }, error: null }),
+      getUser: () => Promise.resolve({ data: { user: null }, error: null }),
+      onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+      signIn: async () => ({ data: null, error: new Error('Supabase not configured') }),
+      signOut: async () => ({ error: null }),
+      signUp: async () => ({ data: null, error: new Error('Supabase not configured') }),
+    },
+    storage: {} as ReturnType<SupabaseClient['storage']>,
+    from: () => ({} as ReturnType<SupabaseClient['from']>),
+    rpc: () => ({} as ReturnType<SupabaseClient['rpc']>),
+    rest: {} as ReturnType<SupabaseClient['rest']>,
+    realtime: {} as ReturnType<SupabaseClient['realtime']>,
+    removeChannel: () => ({}),
+    getChannels: () => ([]),
+    channel: () => ({} as ReturnType<SupabaseClient['channel']>),
+  } as unknown as SupabaseClient;
+}
+
+export const supabase = getSupabase();
 
 /**
  * Upload a file to Supabase Storage
