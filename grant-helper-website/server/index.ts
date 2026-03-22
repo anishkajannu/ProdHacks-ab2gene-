@@ -659,6 +659,112 @@ app.post('/api/profile/extract', async (req: Request, res: Response): Promise<vo
   }
 });
 
+/** GET /api/grants/catalog
+ * Query params: q (keyword search, optional), category (optional), limit (default 20)
+ * Returns grants from local seed catalog, normalized to GrantsGovOpportunity shape
+ */
+import { readFileSync } from 'fs';
+
+interface CatalogGrant {
+  id: string;
+  opportunity_title: string;
+  provider: string;
+  category: string;
+  funding_min: number | null;
+  funding_max: number | null;
+  geographic_scope: string;
+  states_eligible: string[];
+  eligibility_types: string[];
+  focus_areas: string[];
+  target_population: string;
+  description: string;
+  application_url: string;
+  deadline_type: string;
+  typical_deadline_month: number | null;
+  is_recurring: boolean;
+  notes: string;
+}
+
+let _catalogGrants: CatalogGrant[] | null = null;
+
+function loadCatalog(): CatalogGrant[] {
+  if (_catalogGrants) return _catalogGrants;
+  try {
+    const seedPath = path.resolve(__dirname, '..', 'src', 'data', 'grants-seed.json');
+    const raw = readFileSync(seedPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    _catalogGrants = parsed.grants ?? [];
+    console.log(`Loaded ${_catalogGrants!.length} grants from catalog`);
+    return _catalogGrants!;
+  } catch (err) {
+    console.warn('Could not load grants catalog:', err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+function normalizeCatalogGrant(g: CatalogGrant): Record<string, unknown> {
+  return {
+    opportunity_id: `catalog-${g.id}`,
+    opportunity_title: g.opportunity_title,
+    opportunity_number: null,
+    agency_name: g.provider,
+    source: 'catalog',
+    category: g.category,
+    geographic_scope: g.geographic_scope,
+    states_eligible: g.states_eligible,
+    eligibility_types: g.eligibility_types,
+    focus_areas: g.focus_areas,
+    target_population: g.target_population,
+    application_url: g.application_url,
+    is_recurring: g.is_recurring,
+    deadline_type: g.deadline_type,
+    typical_deadline_month: g.typical_deadline_month,
+    notes: g.notes,
+    summary: {
+      summary_description: g.description,
+      award_floor: g.funding_min,
+      award_ceiling: g.funding_max,
+      close_date: null,
+      post_date: null,
+    },
+  };
+}
+
+app.get('/api/grants/catalog', (req: Request, res: Response): void => {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q.toLowerCase().trim() : '';
+    const category = typeof req.query.category === 'string' ? req.query.category.toLowerCase().trim() : '';
+    const limit = Math.min(Number(req.query.limit) || 50, 100);
+
+    let grants = loadCatalog();
+
+    if (q) {
+      grants = grants.filter(g => {
+        const searchable = [
+          g.opportunity_title,
+          g.provider,
+          g.description,
+          g.category,
+          ...(g.focus_areas ?? []),
+          g.target_population,
+          g.notes,
+        ].join(' ').toLowerCase();
+        return q.split(' ').every(term => searchable.includes(term));
+      });
+    }
+
+    if (category) {
+      grants = grants.filter(g => g.category.toLowerCase().includes(category));
+    }
+
+    const normalized = grants.slice(0, limit).map(normalizeCatalogGrant);
+    res.json({ data: normalized, total: normalized.length, source: 'catalog' });
+  } catch (err) {
+    console.error('Catalog error:', err);
+    res.status(500).json({ error: 'Failed to load catalog' });
+  }
+});
+
 const PORT = Number(process.env.PORT) || 3001;
 app.listen(PORT, () => {
   console.log(`Grant chat API listening on http://localhost:${PORT}`);

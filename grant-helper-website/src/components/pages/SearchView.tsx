@@ -27,44 +27,48 @@ export default function SearchView({ organizationProfile = '' }: SearchViewProps
     setError(null);
     setOpportunities([]);
     try {
-      // Step 1: Search for grants
-      const result = await searchOpportunities({
-        query: query.trim() || 'education',
-        pagination: { page_offset: 1, page_size: 10 },
-      });
-      const grants = result.data ?? [];
+      const searchQuery = query.trim() || 'education';
 
-      // Step 2: If we have organization profile, use smart matching
-      if (organizationProfile && grants.length > 0) {
+      // Step 1: Fetch from Grants.gov and internal catalog in parallel
+      const [grantsGovResult, catalogResult] = await Promise.allSettled([
+        searchOpportunities({ query: searchQuery, pagination: { page_offset: 1, page_size: 10 } }),
+        fetch(`/api/grants/catalog?q=${encodeURIComponent(searchQuery)}&limit=15`).then(r => r.json()),
+      ]);
+
+      const grantsGovGrants = grantsGovResult.status === 'fulfilled' ? (grantsGovResult.value.data ?? []) : [];
+      const catalogGrants = catalogResult.status === 'fulfilled' ? (catalogResult.value.data ?? []) : [];
+
+      // Merge: catalog first (curated), then Grants.gov live results
+      const merged = [...catalogGrants, ...grantsGovGrants];
+
+      if (merged.length === 0) {
+        setOpportunities([]);
+        return;
+      }
+
+      // Step 2: Smart matching if profile is available
+      if (organizationProfile) {
         setMatchingInProgress(true);
         try {
           const matchResponse = await fetch('/api/grants/smart-match', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              organizationProfile,
-              grants,
-              topN: grants.length, // Match all grants, we'll display scores
-            }),
+            body: JSON.stringify({ organizationProfile, grants: merged, topN: merged.length }),
           });
-
           if (matchResponse.ok) {
             const { matches } = await matchResponse.json();
             setOpportunities(matches);
           } else {
-            // Fallback: display grants without scores
-            setOpportunities(grants);
+            setOpportunities(merged);
           }
         } catch (matchErr) {
           console.error('Smart matching failed:', matchErr);
-          // Fallback: display grants without scores
-          setOpportunities(grants);
+          setOpportunities(merged);
         } finally {
           setMatchingInProgress(false);
         }
       } else {
-        // No profile or no grants: display as-is
-        setOpportunities(grants);
+        setOpportunities(merged);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Search failed');
@@ -130,7 +134,8 @@ export default function SearchView({ organizationProfile = '' }: SearchViewProps
         <div className="search-results">
           <h3 className="search-results-title">
             Found {opportunities.length} opportunities
-            {matchingInProgress && ' (analyzing matches...)'}
+            {' '}({opportunities.filter(o => (o as Record<string, unknown>).source === 'catalog').length} catalog, {opportunities.filter(o => (o as Record<string, unknown>).source !== 'catalog').length} live)
+            {matchingInProgress && ' — analyzing matches...'}
           </h3>
           <ul className="opportunity-list">
             {opportunities.map((opp, i) => {
@@ -144,10 +149,26 @@ export default function SearchView({ organizationProfile = '' }: SearchViewProps
                 : '#ef4444'
                 : '#64748b';
 
+              const isCatalog = (opp as Record<string, unknown>).source === 'catalog';
+
               const content = (
                 <>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
                     <strong className="opportunity-title">{opp.opportunity_title}</strong>
+                    {isCatalog && (
+                      <span style={{
+                        backgroundColor: '#7c3aed',
+                        color: 'white',
+                        padding: '2px 8px',
+                        borderRadius: '10px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        flexShrink: 0,
+                        letterSpacing: '0.03em',
+                      }}>
+                        CATALOG
+                      </span>
+                    )}
                     {hasMatchScore && (
                       <span
                         style={{
@@ -207,13 +228,19 @@ export default function SearchView({ organizationProfile = '' }: SearchViewProps
                     {opp.summary?.post_date && <span>Posted: {opp.summary.post_date}</span>}
                     <span>Closes: {opp.summary?.close_date ?? 'No deadline'}</span>
                   </div>
-                  {url && <span className="opportunity-link-hint">View on Grants.gov →</span>}
+                  {isCatalog
+                    ? <span className="opportunity-link-hint">View grant details →</span>
+                    : url && <span className="opportunity-link-hint">View on Grants.gov →</span>
+                  }
                 </>
               );
+              const catalogUrl = isCatalog ? (opp as Record<string, unknown>).application_url as string | null : null;
+              const linkUrl = catalogUrl ?? url;
+
               return (
                 <li key={opp.opportunity_id ?? `opp-${i}`} className="opportunity-card">
-                  {url ? (
-                    <a href={url} target="_blank" rel="noopener noreferrer" className="opportunity-link">
+                  {linkUrl ? (
+                    <a href={linkUrl} target="_blank" rel="noopener noreferrer" className="opportunity-link">
                       {content}
                     </a>
                   ) : (
