@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grant Helper</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <p class="eyebrow">Task 1 - Chrome Extension: Grant Autofill</p>
+      <h1>Field Detection & Fuzzy Matching</h1>
+      <p class="subtitle">Current milestone: scan any grant page and identify likely autofill targets before we start filling.</p>
+      <section class="task-card">
+        <p class="task-label">Aligned build steps</p>
+        <ul class="task-list">
+          <li>Scan all visible <code>input</code>, <code>textarea</code>, and <code>select</code> elements</li>
+          <li>Extract label, id, name, placeholder, and ARIA metadata</li>
+          <li>Map fields to canonical grant-profile schema keys</li>
+          <li>Flag low-confidence or unknown fields for manual review</li>
+        </ul>
+      </section>
+      <button id="scan-button" type="button">Scan current page</button>
+      <p id="status" class="status">Ready.</p>
+      <div id="results" class="results"></div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+  </html>
