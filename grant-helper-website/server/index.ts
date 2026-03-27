@@ -21,7 +21,14 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
 let supabaseAdmin: SupabaseClient | null = null;
-if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+const hasValidSupabaseUrl = (() => {
+  try {
+    return !!SUPABASE_URL && /^https?:\/\//i.test(SUPABASE_URL) && Boolean(new URL(SUPABASE_URL));
+  } catch {
+    return false;
+  }
+})();
+if (hasValidSupabaseUrl && SUPABASE_ANON_KEY) {
   supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
 
@@ -31,15 +38,18 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) {
+if (!OPENAI_API_KEY && !GEMINI_API_KEY) {
   console.error(
-    'Missing GEMINI_API_KEY. Add GEMINI_API_KEY=your_key to a .env file in the project root (grant-helper-website/.env).'
+    'Missing API key. Add OPENAI_API_KEY=your_key or GEMINI_API_KEY=your_key to grant-helper-website/.env.'
   );
   process.exit(1);
 }
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
 const RAG_SYSTEM_INSTRUCTION = `You are the founder or program director of the organization applying for this grant.
 You are personally completing this grant application. All information provided represents your organization's real operations, programs, impact, and plans.
@@ -74,6 +84,19 @@ interface ChatRequestBody {
   messages?: unknown;
 }
 
+interface AutofillFieldRequestBody {
+  questionText?: unknown;
+  fieldKey?: unknown;
+  descriptor?: unknown;
+  tagName?: unknown;
+  inputType?: unknown;
+  pageTitle?: unknown;
+  pageUrl?: unknown;
+  organizationProfile?: unknown;
+  grantContext?: unknown;
+  userId?: unknown;
+}
+
 function buildSystemInstruction(profileContext: string, grantContext: string): string {
   let out = RAG_SYSTEM_INSTRUCTION;
   if (profileContext.trim()) {
@@ -81,6 +104,23 @@ function buildSystemInstruction(profileContext: string, grantContext: string): s
   }
   out += `Grant opportunity (use for deadlines, eligibility, amounts, etc.):\n${grantContext}`;
   return out;
+}
+
+function isNonAutofillField(fieldKey: string, inputType: string, tagName: string): boolean {
+  const blockedKeys = new Set([
+    'password',
+    'confirm_password',
+    'username',
+    'birth_month',
+    'birth_day',
+    'unknown'
+  ]);
+
+  if (blockedKeys.has(fieldKey)) {
+    return true;
+  }
+
+  return inputType === 'checkbox' || inputType === 'radio' || inputType === 'password' || tagName === 'button';
 }
 
 /** Fetch combined text from document_chunks for a user (Supabase). Returns empty string if not configured or no data. */
@@ -102,14 +142,165 @@ async function fetchUserDocumentContext(userId: string): Promise<string> {
 
 /** Generate one grant-application answer using Gemini from context and question. */
 async function generateAnswerForQuestion(context: string, question: string, wordLimit?: number): Promise<string> {
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
-    systemInstruction: RAG_SYSTEM_INSTRUCTION + (wordLimit ? ` Keep your answer within ${wordLimit} words.` : ''),
-  });
+  const instructions = RAG_SYSTEM_INSTRUCTION + (wordLimit ? ` Keep your answer within ${wordLimit} words.` : '');
   const prompt = `Context from the organization's documents and profile:\n\n${context}\n\nQuestion to answer:\n${question}\n\nProvide a direct, concise answer suitable for pasting into a grant form.`;
+  return await generateModelText(instructions, prompt);
+}
+
+async function generateAutofillAnswer(options: {
+  organizationContext: string;
+  grantContext: string;
+  questionText: string;
+  fieldKey: string;
+  descriptor: string;
+  tagName: string;
+  inputType: string;
+  pageTitle: string;
+  pageUrl: string;
+}): Promise<{ answer: string; confidence: 'high' | 'medium' | 'low'; rationale: string; normalizedFieldKey: string; }> {
+  const {
+    organizationContext,
+    grantContext,
+    questionText,
+    fieldKey,
+    descriptor,
+    tagName,
+    inputType,
+    pageTitle,
+    pageUrl,
+  } = options;
+
+  if (isNonAutofillField(fieldKey, inputType, tagName)) {
+    return {
+      answer: '',
+      confidence: 'low',
+      rationale: 'Skipped because this field should not be auto-filled.',
+      normalizedFieldKey: fieldKey || 'unknown',
+    };
+  }
+
+  const instructions = `${RAG_SYSTEM_INSTRUCTION}
+
+You are generating one auto-fill value for a grant portal field.
+Return strict JSON only with keys: normalizedFieldKey, answer, confidence, rationale.
+- normalizedFieldKey must be snake_case.
+- confidence must be one of high, medium, low.
+- rationale should be one short sentence.
+- answer should be ready to paste into the field.
+- For short text inputs, keep the answer short.
+- For textarea questions, answer in one concise paragraph.
+- If the field should not be auto-filled or the context is insufficient, return answer as an empty string and confidence as low.`;
+
+  const prompt = `Field key guess: ${fieldKey || 'unknown'}
+Field question or label:
+${questionText}
+
+Descriptor:
+${descriptor || 'n/a'}
+
+HTML tag / input type:
+${tagName} / ${inputType}
+
+Page title:
+${pageTitle || 'n/a'}
+
+Page URL:
+${pageUrl || 'n/a'}
+
+Grant context:
+${grantContext || 'n/a'}
+
+Organization profile context:
+${organizationContext}
+`;
+
+  const raw = await generateModelText(instructions, prompt);
+  const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
+
+  try {
+    const parsed = JSON.parse(cleaned) as {
+      normalizedFieldKey?: string;
+      answer?: string;
+      confidence?: 'high' | 'medium' | 'low';
+      rationale?: string;
+    };
+
+    return {
+      normalizedFieldKey: parsed.normalizedFieldKey?.trim() || fieldKey || 'unknown',
+      answer: parsed.answer?.trim() || '',
+      confidence: parsed.confidence === 'high' || parsed.confidence === 'medium' || parsed.confidence === 'low'
+        ? parsed.confidence
+        : 'low',
+      rationale: parsed.rationale?.trim() || 'No rationale returned.',
+    };
+  } catch {
+    return {
+      normalizedFieldKey: fieldKey || 'unknown',
+      answer: cleaned,
+      confidence: cleaned ? 'medium' : 'low',
+      rationale: 'Model response could not be parsed as JSON, so fallback text was used.',
+    };
+  }
+}
+
+async function generateOpenAIText(instructions: string, messages: Array<{ role: 'developer' | 'user' | 'assistant'; content: string }>): Promise<string> {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'developer', content: instructions },
+        ...messages,
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => '');
+    throw new Error(`OpenAI request failed: ${response.status} ${errorBody}`.trim());
+  }
+
+  const json = await response.json() as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+
+  return json.choices?.[0]?.message?.content?.trim() || '';
+}
+
+async function generateGeminiText(instructions: string, prompt: string): Promise<string> {
+  if (!genAI) {
+    throw new Error('Gemini client is not configured.');
+  }
+
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    systemInstruction: instructions,
+  });
   const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  return (text ?? '').trim();
+  return (result.response.text() ?? '').trim();
+}
+
+async function generateModelText(
+  instructions: string,
+  prompt: string,
+  history: Array<{ role: 'user' | 'model'; content: string }> = []
+): Promise<string> {
+  if (OPENAI_API_KEY) {
+    const messages = [
+      ...history.map((message) => ({
+        role: message.role === 'model' ? 'assistant' as const : 'user' as const,
+        content: message.content,
+      })),
+      { role: 'user' as const, content: prompt },
+    ];
+    return await generateOpenAIText(instructions, messages);
+  }
+
+  return await generateGeminiText(instructions, prompt);
 }
 
 /** Extract text from PDF using pdfjs-dist directly (avoids Buffer vs Uint8Array issues in pdf-parse). */
@@ -195,26 +386,22 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     }
     const profile = typeof profileContext === 'string' ? profileContext : '';
 
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.0-flash',
-      systemInstruction: buildSystemInstruction(profile, grantContext),
-    });
-
     const valid = (messages as ChatMessage[]).filter((m) => m.role && m.content);
-    const history = valid.slice(0, -1).map((m) => ({
-      role: (m.role === 'model' ? 'model' : 'user') as 'user' | 'model',
-      parts: [{ text: m.content }],
-    }));
     const lastMessage = valid[valid.length - 1];
     const toSend =
       lastMessage?.role === 'user'
         ? lastMessage.content
         : 'Say you are ready to answer questions about this grant.';
+    const priorHistory = valid.slice(0, -1).map((m) => ({
+      role: (m.role === 'model' ? 'model' : 'user') as 'user' | 'model',
+      content: m.content,
+    }));
 
-    const chat = model.startChat({ history });
-    const result = await chat.sendMessage(toSend);
-    const response = result.response;
-    const text = response.text();
+    const text = await generateModelText(
+      buildSystemInstruction(profile, grantContext),
+      toSend,
+      priorHistory
+    );
 
     res.json({ reply: text ?? '' });
   } catch (err) {
@@ -227,6 +414,62 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           : 'Failed to get reply from assistant';
     console.error('Chat error:', err);
     res.status(status === 429 ? 429 : 500).json({ error: message });
+  }
+});
+
+app.post('/api/autofill-field', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const {
+      questionText,
+      fieldKey = '',
+      descriptor = '',
+      tagName = '',
+      inputType = '',
+      pageTitle = '',
+      pageUrl = '',
+      organizationProfile = '',
+      grantContext = '',
+      userId = '',
+    } = req.body as AutofillFieldRequestBody;
+
+    if (!questionText || typeof questionText !== 'string' || !questionText.trim()) {
+      res.status(400).json({ error: 'questionText is required and must be a string' });
+      return;
+    }
+
+    let organizationContext = typeof organizationProfile === 'string' ? organizationProfile.trim() : '';
+    if (typeof userId === 'string' && userId.trim() && supabaseAdmin) {
+      const docContext = await fetchUserDocumentContext(userId.trim());
+      if (docContext) {
+        organizationContext = organizationContext
+          ? `${organizationContext}\n\n--- Documents from Supabase ---\n\n${docContext}`
+          : docContext;
+      }
+    }
+
+    if (!organizationContext) {
+      res.status(400).json({ error: 'organizationProfile or user document context is required' });
+      return;
+    }
+
+    const result = await generateAutofillAnswer({
+      organizationContext,
+      grantContext: typeof grantContext === 'string' ? grantContext.trim() : '',
+      questionText: questionText.trim(),
+      fieldKey: typeof fieldKey === 'string' ? fieldKey.trim() : '',
+      descriptor: typeof descriptor === 'string' ? descriptor.trim() : '',
+      tagName: typeof tagName === 'string' ? tagName.trim() : '',
+      inputType: typeof inputType === 'string' ? inputType.trim() : '',
+      pageTitle: typeof pageTitle === 'string' ? pageTitle.trim() : '',
+      pageUrl: typeof pageUrl === 'string' ? pageUrl.trim() : '',
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('Autofill field error:', err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to generate autofill answer',
+    });
   }
 });
 
