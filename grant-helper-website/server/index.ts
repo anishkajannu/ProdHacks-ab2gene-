@@ -579,6 +579,10 @@ app.get('/api/google-form/prefill-url', (req: Request, res: Response): void => {
 });
 
 const PORT = Number(process.env.PORT) || 3001;
-app.listen(PORT, () => {
-  console.log(`Grant chat API listening on http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Grant chat API listening on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
