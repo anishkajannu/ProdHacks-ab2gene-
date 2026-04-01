@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { extractDocuments } from '../../api/extractDocuments';
-import { supabase, uploadToSupabase } from '../../config/supabase';
+import { lookupEIN } from '../../api/einLookup';
+import { supabase, uploadToSupabase, saveOrganizationProfileText } from '../../config/supabase';
 import './EmptyState.css';
 import './ProfileView.css';
 
@@ -48,6 +49,11 @@ export default function ProfileView({onOrganizationProfileChange,
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [showEINModal, setShowEINModal] = useState(false);
+  const [einValue, setEINValue] = useState('');
+  const [einLoading, setEINLoading] = useState(false);
+  const [einError, setEINError] = useState<string | null>(null);
 
   const addFiles = useCallback((incoming: FileList | File[]) => {
     const valid = Array.from(incoming).filter((f) =>
@@ -97,7 +103,9 @@ export default function ProfileView({onOrganizationProfileChange,
           <button className="btn-primary" onClick={() => setShowUpload(true)}>
             Get Started
           </button>
-          <button className="btn-secondary">Import from EIN</button>
+          <button className="btn-secondary" onClick={() => { setShowEINModal(true); setEINError(null); setEINValue(''); }}>
+            Import from EIN
+          </button>
         </div>
 
         <div className="feature-grid">
@@ -123,6 +131,60 @@ export default function ProfileView({onOrganizationProfileChange,
             </p>
           </div>
         </div>
+
+        {showEINModal && (
+          <div className="ein-modal-overlay" onClick={() => setShowEINModal(false)}>
+            <div className="ein-modal" onClick={(e) => e.stopPropagation()}>
+              <h3 className="ein-modal-title">Import from EIN</h3>
+              <p className="ein-modal-subtitle">
+                Enter your organization's Employer Identification Number (EIN) to automatically import your public IRS 990 filings and organization profile.
+              </p>
+              <input
+                className="ein-input"
+                type="text"
+                placeholder="XX-XXXXXXX"
+                value={einValue}
+                maxLength={10}
+                onChange={(e) => {
+                  const raw = e.target.value.replace(/\D/g, '');
+                  setEINValue(raw.length > 2 ? `${raw.slice(0, 2)}-${raw.slice(2)}` : raw);
+                  setEINError(null);
+                }}
+              />
+              {einError && <p className="ein-error">{einError}</p>}
+              <div className="ein-modal-actions">
+                <button className="btn-secondary" onClick={() => setShowEINModal(false)} disabled={einLoading}>
+                  Cancel
+                </button>
+                <button
+                  className="btn-primary"
+                  disabled={einLoading || einValue.replace(/\D/g, '').length !== 9}
+                  onClick={async () => {
+                    setEINLoading(true);
+                    setEINError(null);
+                    try {
+                      const { data: { session } } = await supabase.auth.getSession();
+                      if (!session?.user) {
+                        setEINError('Please sign in before importing via EIN so your data can be saved.');
+                        return;
+                      }
+                      const { text } = await lookupEIN(einValue);
+                      onOrganizationProfileChange(text);
+                      await saveOrganizationProfileText(session.user.id, text);
+                      setShowEINModal(false);
+                    } catch (err) {
+                      setEINError(err instanceof Error ? err.message : 'Lookup failed. Check the EIN and try again.');
+                    } finally {
+                      setEINLoading(false);
+                    }
+                  }}
+                >
+                  {einLoading ? 'Importing…' : 'Import'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -223,17 +285,19 @@ export default function ProfileView({onOrganizationProfileChange,
                 setExtracting(true);
                 try {
                   // Ensure we have a user for Supabase (anonymous if needed) so uploads can be saved
-                  let { data: { session } } = await supabase.auth.getSession();
+                  const { data: { session } } = await supabase.auth.getSession();
                   const supabaseConfigured = !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
                   if (!session?.user && supabaseConfigured) {
-                    const { data: anon, error: anonErr } = await supabase.auth.signInAnonymously();
-                    if (anonErr) {
-                      setExtractError(
-                        `Documents could not be saved to Supabase: ${anonErr.message}. Enable Anonymous sign-in in Supabase Dashboard → Authentication → Providers.`
-                      );
-                      // Continue to extraction below so profile still works
-                    }
-                    if (anon?.session) session = anon.session;
+                    // const { data: anon, error: anonErr } = await supabase.auth.signInAnonymously();
+                    // if (anonErr) {
+                    //   setExtractError(
+                    //     `Documents could not be saved to Supabase: ${anonErr.message}. Enable Anonymous sign-in in Supabase Dashboard → Authentication → Providers.`
+                    //   );
+                    //   // Continue to extraction below so profile still works
+                    // }
+                    // if (anon?.session) session = anon.session;
+                    setExtractError('Please sign in to save your documents.');
+                    return;
                   }
                   const userId = session?.user?.id;
 
@@ -245,7 +309,7 @@ export default function ProfileView({onOrganizationProfileChange,
                       } catch (uploadErr) {
                         console.warn('Supabase upload failed for', file.name, uploadErr);
                         setExtractError(
-                          uploadErr instanceof Error ? uploadErr.message + ". This is the first issue." : 'One or more files could not be saved to your account. Extraction will continue.'
+                          uploadErr instanceof Error ? uploadErr.message : 'One or more files could not be saved to your account. Extraction will continue.'
                         );
                       }
                     }
@@ -256,7 +320,7 @@ export default function ProfileView({onOrganizationProfileChange,
                   setShowUpload(false);
                 } catch (err) {
                   console.warn('Supabase upload failed for', err);
-                  setExtractError(err instanceof Error ? err.message + ". This is the second issue." : 'Failed to extract text from documents');
+                  setExtractError(err instanceof Error ? err.message : 'Failed to extract text from documents');
                 } finally {
                   setExtracting(false);
                 }
