@@ -711,26 +711,30 @@ app.post('/api/ein-lookup', async (req: Request, res: Response): Promise<void> =
       }
     }
 
-    // Try to extract text from the most recent 990 PDF
-    const pdfUrl = recentFilings.find((f) => f.pdf_url)?.pdf_url;
-    const pdfPromise = pdfUrl
-      ? fetch(pdfUrl)
-          .then(async (r) => {
-            if (!r.ok) return '';
-            const buf = Buffer.from(await r.arrayBuffer());
-            return extractTextFromPdf(buf);
-          })
-          .catch(() => '')
-      : Promise.resolve('');
-
     // --- Section 3: USASpending.gov — past federal grants ---
-    const usaSpendingPromise = fetch('https://api.usaspending.gov/api/v2/search/spending_by_award/', {
+    // Normalize the org name against USASpending's registry to avoid IRS vs SAM.gov name mismatches
+    let usaSpendingSearchName = org.name;
+    try {
+      const acRes = await fetch('https://api.usaspending.gov/api/v2/autocomplete/recipient/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ search_text: org.name, limit: 1 }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (acRes.ok) {
+        const acData = await acRes.json() as { results?: Array<{ recipient_name?: string }> };
+        const normalizedName = acData.results?.[0]?.recipient_name;
+        if (normalizedName) usaSpendingSearchName = normalizedName;
+      }
+    } catch { /* fall back to org.name */ }
+
+    const usaSpendingData = await fetch('https://api.usaspending.gov/api/v2/search/spending_by_award/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         filters: {
           award_type_codes: ['02', '03', '04', '05'],
-          recipient_search_text: [org.name],
+          recipient_search_text: [usaSpendingSearchName],
         },
         fields: ['Award ID', 'Recipient Name', 'Award Amount', 'Awarding Agency', 'Start Date', 'Description', 'CFDA Number', 'CFDA Title'],
         page: 1,
@@ -755,12 +759,6 @@ app.post('/api/ein-lookup', async (req: Request, res: Response): Promise<void> =
         }>;
       })
       .catch(() => null);
-
-    const [pdfText, usaSpendingData] = await Promise.all([pdfPromise, usaSpendingPromise]);
-
-    if (pdfText?.trim()) {
-      parts.push('\n=== IRS Form 990 — Full Text (Most Recent Filing) ===\n' + pdfText.trim());
-    }
 
     const awards = usaSpendingData?.results ?? [];
     if (awards.length > 0) {
