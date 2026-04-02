@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { extractDocuments } from '../../api/extractDocuments';
-import { supabase, uploadToSupabase } from '../../config/supabase';
+import { deleteDocument, supabase, uploadToSupabase, type UserDocumentRow } from '../../config/supabase';
 import './EmptyState.css';
 import './ProfileView.css';
 
@@ -36,12 +36,14 @@ const SUGGESTED_DOCS = [
 ];
 
 interface ProfileViewProps {
-  organizationProfile: string;
   onOrganizationProfileChange: (value: string) => void;
+  userDocuments?: UserDocumentRow[];
 }
 
 export default function ProfileView({onOrganizationProfileChange,
+  userDocuments = [],
 }: ProfileViewProps) {
+  const [savedDocuments, setSavedDocuments] = useState<UserDocumentRow[]>(userDocuments);
   const [showUpload, setShowUpload] = useState(false);
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -77,10 +79,20 @@ export default function ProfileView({onOrganizationProfileChange,
     setFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
+  const handleDelete = async (id: string) => {
+    setSavedDocuments(savedDocuments.filter((doc) => doc.id !== id));
+    await deleteDocument(id);
+  };
+
   const formatSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const formatStoredDocSize = (bytes: number | null) => {
+    if (bytes == null) return '';
+    return formatSize(bytes);
   };
 
   if (!showUpload) {
@@ -188,6 +200,31 @@ export default function ProfileView({onOrganizationProfileChange,
       </div>
 
       {/* Uploaded files */}
+      {savedDocuments.length > 0 && (
+        <div className="file-list-section">
+          <h3 className="file-list-title">Saved Documents ({savedDocuments.length})</h3>
+          <ul className="file-list">
+            {savedDocuments.map((doc) => (
+              <li key={doc.id} className="file-item">
+                <span className="file-type-badge">
+                  {FILE_TYPE_LABELS[doc.mime_type ?? ''] ?? 'FILE'}
+                </span>
+                <div className="file-info">
+                  <span className="file-name">{doc.filename}</span>
+                  <span className="file-size">{formatStoredDocSize(doc.file_size_bytes)}</span>
+                </div>
+                <button
+                  className="file-remove"
+                  onClick={() => handleDelete(doc.id)}
+                  title="Remove file">
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {files.length > 0 && (
         <div className="file-list-section">
           <h3 className="file-list-title">Uploaded Files ({files.length})</h3>

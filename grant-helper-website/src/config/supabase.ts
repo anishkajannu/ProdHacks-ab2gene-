@@ -60,7 +60,7 @@ export async function uploadToSupabase(file: File, userId: string): Promise<stri
  * @param userId - User ID (from auth.user())
  * @returns Array of document metadata
  */
-export async function getUserDocuments(userId: string) {
+export async function getUserDocuments(userId: string): Promise<UserDocumentRow[]> {
   const { data, error } = await supabase
     .from('documents')
     .select('*')
@@ -68,8 +68,17 @@ export async function getUserDocuments(userId: string) {
     .order('created_at', { ascending: false });
 
   if (error) throw error;
-  return data;
+  return (data ?? []) as UserDocumentRow[];
 }
+
+export type UserDocumentRow = {
+  id: string;
+  filename: string;
+  mime_type: string | null;
+  file_size_bytes: number | null;
+  created_at: string;
+  status: string | null;
+};
 
 /**
  * Search user's document chunks (RAG retrieval)
@@ -128,18 +137,18 @@ export type OrganizationProfileRow = {
   organization_profile: string;
 };
 
-export async function fetchOrganizationProfile(
-  userId: string
-): Promise<OrganizationProfileRow | null> {
-  const { data, error } = await supabase
-    .from('organization_profiles')
-    .select('organization_name, organization_profile')
-    .eq('user_id', userId)
-    .maybeSingle();
+// export async function fetchOrganizationProfile(
+//   userId: string
+// ): Promise<OrganizationProfileRow | null> {
+//   const { data, error } = await supabase
+//     .from('organization_profiles')
+//     .select('organization_name, organization_profile')
+//     .eq('user_id', userId)
+//     .maybeSingle();
 
-  if (error) throw error;
-  return data;
-}
+//   if (error) throw error;
+//   return data;
+// }
 
 /** Ensures a row exists (e.g. if signup predates the org-profile migration). */
 export async function ensureOrganizationProfileRow(userId: string): Promise<void> {
