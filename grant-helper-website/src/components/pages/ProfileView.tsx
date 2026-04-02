@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { extractDocuments } from '../../api/extractDocuments';
 import { lookupEIN } from '../../api/einLookup';
-import { supabase, uploadToSupabase, saveOrganizationProfileText } from '../../config/supabase';
+import { deleteDocument, supabase, uploadToSupabase, saveOrganizationProfileText, type UserDocumentRow } from '../../config/supabase';
 import './EmptyState.css';
 import './ProfileView.css';
 
