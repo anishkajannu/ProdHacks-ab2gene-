@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // const require = createRequire(import.meta.url);
 // Load .env from project root (cwd when run via "npm run dev:server"), then try next to server/
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
-if (!process.env.GEMINI_API_KEY) {
+if (!process.env.OPENAI_API_KEY) {
   dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 }
 
@@ -15,6 +15,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import mammoth from 'mammoth';
+import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
@@ -50,6 +51,7 @@ if (!OPENAI_API_KEY && !GEMINI_API_KEY) {
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 const RAG_SYSTEM_INSTRUCTION = `You are the founder or program director of the organization applying for this grant.
 You are personally completing this grant application. All information provided represents your organization's real operations, programs, impact, and plans.
@@ -74,7 +76,7 @@ Keep the tone confident, professional, and human.
 `;
 
 interface ChatMessage {
-  role: 'user' | 'model';
+  role: 'user' | 'assistant' | 'model'; // 'model' for backwards compatibility
   content: string;
 }
 
@@ -804,6 +806,217 @@ async function generateModelText(
   return await generateGeminiText(instructions, prompt);
 }
 
+/** Extract structured organization profile from documents using LLM */
+async function extractOrganizationProfile(documentText: string): Promise<Record<string, unknown>> {
+  const systemPrompt = `You are a nonprofit grant consultant's data extraction assistant. Extract comprehensive information from organization documents to enable precise grant matching.`;
+  const userPrompt = `Extract the following information from this nonprofit organization document. Return ONLY valid JSON with no additional text.
+
+Document:
+${documentText}
+
+Extract into this JSON structure (use null for missing values, be thorough):
+{
+  "name": "Organization name",
+  "annualBudget": 0,
+  "location": {
+    "city": "City name",
+    "state": "Two-letter state code (e.g., PA, NY, TX)",
+    "county": "County name if mentioned",
+    "region": "Region (Northeast, Southeast, Midwest, Southwest, West)",
+    "serviceArea": "local, regional, statewide, or national"
+  },
+  "focusAreas": ["primary focus area", "secondary areas"],
+  "targetPopulation": "Specific demographics served (age, income level, etc.)",
+  "organizationType": "501(c)(3), 501(c)(4), government, etc.",
+  "staffSize": 0,
+  "yearsOperating": 0,
+  "programCapacity": "small/medium/large based on staff and budget"
+}`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    temperature: 0.3,
+    response_format: { type: 'json_object' }
+  });
+
+  const result = completion.choices[0]?.message?.content?.trim() ?? '{}';
+  return JSON.parse(result);
+}
+
+/** Score and rank a grant's relevance to an organization */
+async function scoreGrantMatch(orgProfile: Record<string, unknown>, grantData: Record<string, unknown>): Promise<{ score: number; explanation: string }> {
+  const systemPrompt = `You are an expert grant consultant with 15+ years of experience matching nonprofits to funding opportunities. Score how well a grant matches an organization on a scale of 0-100 using a rigorous, multi-factor analysis.
+
+CALIBRATION EXAMPLES - Study these to understand proper scoring:
+
+EXAMPLE 1 - Excellent Local Match (Score: 88):
+Org: Small education nonprofit, $75k budget, Pittsburgh PA, STEM programs for high schoolers, 8 years operating, 501(c)(3)
+Grant: Pennsylvania Department of Education STEM Grant, $50k-150k awards, PA nonprofits only, supports after-school STEM programs
+Analysis: "Organization is based in Pennsylvania and meets state eligibility requirements perfectly. Budget alignment is excellent with the grant range ($50k-150k) representing 67-200% of current budget, which is highly sustainable. Mission alignment is perfect: both focus on STEM education for high school students with after-school programming. As a state grant, competition is significantly lower than national grants and gives geographic preference. Strong match - highly recommend applying."
+
+EXAMPLE 2 - Good National Match (Score: 72):
+Org: Medium health nonprofit, $500k budget, Detroit MI, mental health services, 12 years operating, 501(c)(3)
+Grant: AmeriCorps State and National, $100k-500k awards, national scope, supports health and education community service programs
+Analysis: "Organization is eligible as a 501(c)(3) nonprofit with no geographic restrictions for this national grant. Budget alignment is good - grant range ($100k-500k) fits well within organizational capacity. Mission alignment is strong: AmeriCorps supports health services including mental health. However, as a national competitive grant, competition level is high with no geographic preference. Solid match worth pursuing if capacity allows for competitive application process."
+
+EXAMPLE 3 - Weak Mission Mismatch (Score: 35):
+Org: Small arts nonprofit, $150k budget, Brooklyn NY, youth theater programs, 5 years operating, 501(c)(3)
+Grant: NASA STEM Workforce Development Hub, $250k-1M awards, national, focuses on aerospace technical training and workforce development
+Analysis: "Organization meets basic eligibility as a 501(c)(3). However, mission alignment is very poor: grant specifically targets aerospace workforce development while organization specializes in arts and theater programming with no STEM component. Budget alignment is challenging - grant minimum ($250k) significantly exceeds org's total budget ($150k), suggesting grant is designed for substantially larger organizations. No geographic advantage. Not recommended - pursue arts education and youth development grants instead."
+
+EXAMPLE 4 - Geographic Ineligibility (Score: 12):
+Org: Rural education nonprofit, $40k budget, Lexington Kentucky, literacy programs, 4 years operating, 501(c)(3)
+Grant: California State Arts Council Grant, $25k-75k awards, restricted to California-based nonprofits only
+Analysis: "Organization does not meet fundamental geographic eligibility requirements - grant is explicitly restricted to California-based organizations and this organization is headquartered in Kentucky. While mission areas (education/arts/youth) have some thematic overlap and budget range would be appropriate, the geographic restriction is an absolute disqualifier. Do not apply - organization is ineligible regardless of other factors."
+
+EXAMPLE 5 - Budget Mismatch Despite Mission Fit (Score: 42):
+Org: Micro animal rescue, $30k budget, Denver CO, pet adoption programs, 3 years operating, 501(c)(3)
+Grant: National Animal Welfare Foundation Major Grants, $500k-2M awards, national, supports large-scale shelter operations and regional programs
+Analysis: "Organization is eligible and mission alignment is excellent - both focus on animal welfare, rescue operations, and adoption services. However, budget alignment is severely problematic: grant minimum ($500k) is over 16x the organization's annual budget, clearly indicating this grant targets major regional shelters with substantial infrastructure, not small local rescues. Managing such a large grant would overwhelm organizational capacity. Competition from large established shelters would be intense. Weak match - organization should pursue smaller regional animal welfare grants ($10k-50k range) instead."`;
+
+  const userPrompt = `Now analyze this NEW organization and grant match using the same rigorous criteria and scoring calibration shown above:
+
+Organization Profile:
+${JSON.stringify(orgProfile, null, 2)}
+
+Grant Opportunity:
+${JSON.stringify(grantData, null, 2)}
+
+Analyze this match using the following weighted criteria:
+
+1. ELIGIBILITY (Pass/Fail - if fail, score must be ≤25):
+   - Organization type (501c3, government, etc.)
+   - Geographic restrictions (state-specific vs national)
+   - Organization size/budget requirements
+   - Years in operation requirements
+
+2. BUDGET ALIGNMENT (Weight: 25%):
+   - Grant amount vs org's annual budget (ideal: 10-50% of budget)
+   - Award floor/ceiling vs org's capacity
+   - Matching requirements vs org's resources
+   Score: 100 if perfect fit, 50 if workable, 0 if unrealistic
+
+3. GEOGRAPHIC FIT (Weight: 30%):
+   - HIGHEST PRIORITY: State/local grants matching org's location
+   - MEDIUM: Regional grants that include org's state
+   - LOWER: National grants (more competition)
+   - Consider: Does grant explicitly target org's city/county/state?
+   Score: 100 for local/state match, 70 for regional, 50 for national eligible, 0 if restricted elsewhere
+
+4. MISSION ALIGNMENT (Weight: 35%):
+   - Does grant's focus area directly match org's programs?
+   - Are target populations aligned?
+   - Do activities/outcomes match org's expertise?
+   Score: 100 for perfect mission match, 70 for strong overlap, 40 for partial, 0 for no alignment
+
+5. COMPETITION & FEASIBILITY (Weight: 10%):
+   - Application complexity vs org's staff capacity
+   - Likely competition level
+   - Timeline to deadline
+   Score: 100 for good fit, 50 for challenging, 0 if not feasible
+
+SCORING GUIDANCE:
+- 90-100: Excellent match - highly recommend applying
+- 75-89: Strong match - good fit, worth pursuing
+- 60-74: Moderate match - consider if capacity allows
+- 40-59: Weak match - only if no better options
+- 0-39: Poor match - not recommended
+
+Return JSON with:
+{
+  "score": <0-100>,
+  "explanation": "<2-3 sentence explanation covering eligibility, budget fit, geographic priority, and mission alignment>"
+}`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    temperature: 0.3,
+    response_format: { type: 'json_object' }
+  });
+
+  const result = completion.choices[0]?.message?.content?.trim() ?? '{"score": 0, "explanation": "Unable to score"}';
+  return JSON.parse(result);
+}
+
+/** Pass 1: Quick eligibility check to filter out obviously ineligible grants */
+async function quickEligibilityCheck(orgProfile: Record<string, unknown>, grantData: Record<string, unknown>): Promise<{ eligible: boolean; reason?: string }> {
+  const systemPrompt = `You are a grant eligibility screener. Quickly determine if an organization is eligible for a grant based on basic requirements.`;
+  const userPrompt = `Organization Profile:
+${JSON.stringify(orgProfile, null, 2)}
+
+Grant Opportunity:
+${JSON.stringify(grantData, null, 2)}
+
+Perform a QUICK eligibility check. Check ONLY these critical factors:
+1. Organization type allowed? (501c3, government, etc.)
+2. Geographic restrictions met? (Is org in an allowed location?)
+3. Basic budget requirements met? (Is award size remotely reasonable for org?)
+
+Return JSON:
+{
+  "eligible": true/false,
+  "reason": "Brief reason if ineligible (e.g., 'Geographic restriction: grant limited to California only')"
+}
+
+If any factor is clearly violated, return eligible: false. When in doubt, return eligible: true.`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    temperature: 0.2,
+    response_format: { type: 'json_object' }
+  });
+
+  const result = completion.choices[0]?.message?.content?.trim() ?? '{"eligible": true}';
+  return JSON.parse(result);
+}
+
+/** Pass 3: Generate application tips for top matches */
+async function generateApplicationTips(orgProfile: Record<string, unknown>, grantData: Record<string, unknown>, matchScore: number): Promise<string> {
+  const systemPrompt = `You are an expert grant consultant helping nonprofits write winning applications. Provide specific, actionable advice for applying to this grant.`;
+  const userPrompt = `Organization Profile:
+${JSON.stringify(orgProfile, null, 2)}
+
+Grant Opportunity (Match Score: ${matchScore}%):
+${JSON.stringify(grantData, null, 2)}
+
+Based on this organization's profile and the grant requirements, provide 3-4 specific application tips.
+
+Focus on:
+1. What to emphasize in their application (specific strengths that match grant priorities)
+2. Suggested funding amount (realistic range based on org's budget and grant limits)
+3. Key points to highlight in narrative sections
+4. Any concerns to address proactively
+
+Keep each tip to 1-2 sentences. Be specific and actionable.
+
+Return as a plain string with tips separated by newlines (not JSON).`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    temperature: 0.5,
+  });
+
+  return completion.choices[0]?.message?.content?.trim() ?? '';
+}
+
+}
+
 /** Extract text from PDF using pdfjs-dist directly (avoids Buffer vs Uint8Array issues in pdf-parse). */
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
   const data = Uint8Array.from(buffer);
@@ -909,7 +1122,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     const status = (err as { status?: number })?.status;
     const message =
       status === 429
-        ? "Rate limit exceeded. Please wait a minute and try again, or check your Gemini API quota."
+        ? "Rate limit exceeded. Please wait a minute and try again, or check your OpenAI API quota."
         : err instanceof Error
           ? err.message
           : 'Failed to get reply from assistant';
@@ -1048,7 +1261,7 @@ app.post('/api/profile-structure', async (req: Request, res: Response): Promise<
 /** POST /api/google-form/prefill
  * Body: { formId, organizationProfile?, entryIds, questions?, userId? }
  * - entryIds: maps field names to Google Form entry IDs (e.g. "impact" -> "entry.216607139" or "216607139").
- * - questions: optional Record<fieldName, questionText>. If provided, answers are generated with Gemini using
+ * - questions: optional Record<fieldName, questionText>. If provided, answers are generated with OpenAI using
  *   context = organizationProfile + (if userId) document_chunks from Supabase; then URLSearchParams are filled.
  * - userId: optional; when set and Supabase is configured, document_chunks for this user are used as context.
  * Returns: { url: string, answers?: Record<string, string> } — pre-fill URL and optionally the generated answers.
@@ -1148,6 +1361,260 @@ app.get('/api/google-form/prefill-url', (req: Request, res: Response): void => {
   }
   const url = `${base}?${params.toString()}`;
   res.redirect(302, url);
+});
+
+/** POST /api/grants/smart-match
+ * Body: { organizationProfile: string, grants: array, topN?: number }
+ * Extracts org metadata, scores each grant, returns top matches with explanations
+ */
+interface SmartMatchRequestBody {
+  organizationProfile?: string;
+  grants?: unknown[];
+  topN?: number;
+}
+
+app.post('/api/grants/smart-match', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { organizationProfile, grants, topN = 10 } = req.body as SmartMatchRequestBody;
+
+    if (!organizationProfile || typeof organizationProfile !== 'string') {
+      res.status(400).json({ error: 'organizationProfile is required and must be a string' });
+      return;
+    }
+    if (!Array.isArray(grants) || grants.length === 0) {
+      res.status(400).json({ error: 'grants must be a non-empty array' });
+      return;
+    }
+
+    // Extract structured organization profile
+    const orgProfile = await extractOrganizationProfile(organizationProfile);
+
+    // PASS 1: Quick eligibility filter (removes ~40% of grants)
+    const eligibleGrants: Array<{ grant: Record<string, unknown>; index: number }> = [];
+    const ineligibleGrants: Array<Record<string, unknown> & { matchScore: number; matchExplanation: string }> = [];
+
+    for (let i = 0; i < grants.length; i++) {
+      const grant = grants[i];
+      try {
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 25000)); // 25s delay for rate limits
+        }
+
+        const { eligible, reason } = await quickEligibilityCheck(orgProfile, grant as Record<string, unknown>);
+
+        if (eligible) {
+          eligibleGrants.push({ grant: grant as Record<string, unknown>, index: i });
+        } else {
+          // Mark ineligible grants with low score
+          ineligibleGrants.push({
+            ...(grant as Record<string, unknown>),
+            matchScore: 10,
+            matchExplanation: reason || 'Does not meet basic eligibility requirements.'
+          });
+        }
+      } catch (err) {
+        console.error(`Failed to check eligibility for grant ${i}:`, err);
+        // If check fails, assume eligible to be safe
+        eligibleGrants.push({ grant: grant as Record<string, unknown>, index: i });
+      }
+    }
+
+    // PASS 2: Detailed scoring for eligible grants only
+    const scoredGrants: Array<Record<string, unknown> & { matchScore: number; matchExplanation: string }> = [];
+    for (const { grant, index } of eligibleGrants) {
+      try {
+        if (scoredGrants.length > 0) {
+          await new Promise(resolve => setTimeout(resolve, 25000)); // 25s delay
+        }
+
+        const { score, explanation } = await scoreGrantMatch(orgProfile, grant);
+        scoredGrants.push({
+          ...grant,
+          matchScore: score,
+          matchExplanation: explanation
+        });
+      } catch (err) {
+        console.error(`Failed to score grant ${index}:`, err);
+        scoredGrants.push({
+          ...grant,
+          matchScore: 0,
+          matchExplanation: 'Failed to score this grant due to an error.'
+        });
+      }
+    }
+
+    // Combine scored and ineligible grants
+    const allGrants = [...scoredGrants, ...ineligibleGrants];
+
+    // Sort by score and get top N
+    const topMatches = allGrants
+      .sort((a, b) => b.matchScore - a.matchScore)
+      .slice(0, topN);
+
+    // PASS 3: Generate application tips for top 3 matches (score >= 60)
+    const matchesWithTips = await Promise.all(
+      topMatches.map(async (match, index) => {
+        // Only generate tips for good matches (60+) and top 3
+        if (index < 3 && match.matchScore >= 60) {
+          try {
+            const tips = await generateApplicationTips(orgProfile, match, match.matchScore);
+            return { ...match, applicationTips: tips };
+          } catch (err) {
+            console.error(`Failed to generate tips for grant ${index}:`, err);
+            return match;
+          }
+        }
+        return match;
+      })
+    );
+
+    res.json({
+      organizationProfile: orgProfile,
+      matches: matchesWithTips,
+      totalScored: grants.length,
+      eligibleCount: eligibleGrants.length,
+      ineligibleCount: ineligibleGrants.length
+    });
+  } catch (err) {
+    console.error('Smart match error:', err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to match grants',
+    });
+  }
+});
+
+/** POST /api/profile/extract
+ * Body: { text: string }
+ * Extracts structured organization metadata from document text
+ * Returns: { profile: OrganizationProfile }
+ */
+interface ExtractProfileBody {
+  text?: string;
+}
+
+app.post('/api/profile/extract', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { text } = req.body as ExtractProfileBody;
+
+    if (!text || typeof text !== 'string') {
+      res.status(400).json({ error: 'text is required and must be a string' });
+      return;
+    }
+
+    const profile = await extractOrganizationProfile(text);
+    res.json({ profile });
+  } catch (err) {
+    console.error('Profile extraction error:', err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to extract profile',
+    });
+  }
+});
+
+/** GET /api/grants/catalog
+ * Query params: q (keyword search, optional), category (optional), limit (default 20)
+ * Returns grants from local seed catalog, normalized to GrantsGovOpportunity shape
+ */
+import { readFileSync } from 'fs';
+
+interface CatalogGrant {
+  id: string;
+  opportunity_title: string;
+  provider: string;
+  category: string;
+  funding_min: number | null;
+  funding_max: number | null;
+  geographic_scope: string;
+  states_eligible: string[];
+  eligibility_types: string[];
+  focus_areas: string[];
+  target_population: string;
+  description: string;
+  application_url: string;
+  deadline_type: string;
+  typical_deadline_month: number | null;
+  is_recurring: boolean;
+  notes: string;
+}
+
+let _catalogGrants: CatalogGrant[] | null = null;
+
+function loadCatalog(): CatalogGrant[] {
+  if (_catalogGrants) return _catalogGrants;
+  try {
+    const seedPath = path.resolve(__dirname, '..', 'src', 'data', 'grants-seed.json');
+    const raw = readFileSync(seedPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    _catalogGrants = parsed.grants ?? [];
+    console.log(`Loaded ${_catalogGrants!.length} grants from catalog`);
+    return _catalogGrants!;
+  } catch (err) {
+    console.warn('Could not load grants catalog:', err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+function normalizeCatalogGrant(g: CatalogGrant): Record<string, unknown> {
+  return {
+    opportunity_id: `catalog-${g.id}`,
+    opportunity_title: g.opportunity_title,
+    opportunity_number: null,
+    agency_name: g.provider,
+    source: 'catalog',
+    category: g.category,
+    geographic_scope: g.geographic_scope,
+    states_eligible: g.states_eligible,
+    eligibility_types: g.eligibility_types,
+    focus_areas: g.focus_areas,
+    target_population: g.target_population,
+    application_url: g.application_url,
+    is_recurring: g.is_recurring,
+    deadline_type: g.deadline_type,
+    typical_deadline_month: g.typical_deadline_month,
+    notes: g.notes,
+    summary: {
+      summary_description: g.description,
+      award_floor: g.funding_min,
+      award_ceiling: g.funding_max,
+      close_date: null,
+      post_date: null,
+    },
+  };
+}
+
+app.get('/api/grants/catalog', (req: Request, res: Response): void => {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q.toLowerCase().trim() : '';
+    const category = typeof req.query.category === 'string' ? req.query.category.toLowerCase().trim() : '';
+    const limit = Math.min(Number(req.query.limit) || 50, 100);
+
+    let grants = loadCatalog();
+
+    if (q) {
+      grants = grants.filter(g => {
+        const searchable = [
+          g.opportunity_title,
+          g.provider,
+          g.description,
+          g.category,
+          ...(g.focus_areas ?? []),
+          g.target_population,
+          g.notes,
+        ].join(' ').toLowerCase();
+        return q.split(' ').every(term => searchable.includes(term));
+      });
+    }
+
+    if (category) {
+      grants = grants.filter(g => g.category.toLowerCase().includes(category));
+    }
+
+    const normalized = grants.slice(0, limit).map(normalizeCatalogGrant);
+    res.json({ data: normalized, total: normalized.length, source: 'catalog' });
+  } catch (err) {
+    console.error('Catalog error:', err);
+    res.status(500).json({ error: 'Failed to load catalog' });
+  }
 });
 
 const PORT = Number(process.env.PORT) || 3001;

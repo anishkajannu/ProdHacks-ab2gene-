@@ -456,6 +456,7 @@ export default function ProfileView({onOrganizationProfileChange,
                     }
                   }
 
+
                   const { text } = await extractDocuments(files.map((f) => f.file));
                   const extractedText = text.trim();
                   if (extractedText && typeof window !== 'undefined') {
@@ -475,6 +476,25 @@ export default function ProfileView({onOrganizationProfileChange,
                     onOrganizationProfileChange(text);
                   }
 
+                  // Extract structured organization profile for smart matching
+                  try {
+                    const profileResponse = await fetch('/api/profile/extract', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ text }),
+                    });
+
+                    if (profileResponse.ok) {
+                      const { profile } = await profileResponse.json();
+                      console.log('Extracted organization profile:', profile);
+                      // Save to localStorage for future use
+                      localStorage.setItem('organizationProfile', JSON.stringify(profile));
+                    }
+                  } catch (profileErr) {
+                    console.warn('Failed to extract structured profile:', profileErr);
+                    // Continue anyway - this is optional enhancement
+                  }
+
                   await loadSavedDocuments();
                   setSaveSuccess(`Saved your files and updated your organization profile from ${files.length} document${files.length === 1 ? '' : 's'}.`);
                   if (warnings.length) {
@@ -489,7 +509,7 @@ export default function ProfileView({onOrganizationProfileChange,
                 }
               }}
             >
-              {extracting ? 'Extracting…' : '✨ Analyze with AI'}
+              {extracting ? 'Analyzing with AI…' : '✨ Analyze with AI'}
             </button>
             {extractError && (
               <p className="upload-error" role="alert">
