@@ -1015,8 +1015,21 @@ Return as a plain string with tips separated by newlines (not JSON).`;
   return completion.choices[0]?.message?.content?.trim() ?? '';
 }
 
-/** Extract text from PDF using pdfjs-dist directly (avoids Buffer vs Uint8Array issues in pdf-parse). */
+/** Extract text from PDF using pdfjs-dist with DOM polyfills for serverless environments. */
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
+  // Polyfill DOM globals that pdfjs-dist expects (missing in Node/serverless)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g = globalThis as any;
+  if (!g.DOMMatrix) {
+    g.DOMMatrix = class { a = 1; b = 0; c = 0; d = 1; e = 0; f = 0; isIdentity = true; is2D = true; };
+  }
+  if (!g.Path2D) {
+    g.Path2D = class {};
+  }
+  if (!g.ImageData) {
+    g.ImageData = class { width = 0; height = 0; data = new Uint8ClampedArray(0); };
+  }
+
   const data = Uint8Array.from(buffer);
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const loadingTask = pdfjs.getDocument({ data });
