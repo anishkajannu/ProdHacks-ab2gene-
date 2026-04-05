@@ -32,7 +32,7 @@ import './App.css';
 function App() {
   const { session, loading: authLoading, supabaseConfigured } = useSupabaseAuth();
   const [activeView, setActiveView] = useState('profile');
-  // const [organizationProfile, setOrganizationProfile] = useState('');
+  const [organizationProfile, setOrganizationProfile] = useState('');
   const [profileReady, setProfileReady] = useState(() => !supabaseConfigured);
   const [userDocuments, setUserDocuments] = useState<UserDocumentRow[]>([]);
 
@@ -121,17 +121,19 @@ function App() {
       case 'profile':
         return (
           <ProfileView
-            userDocuments={userDocuments}
+            organizationProfile={organizationProfile}
+            onOrganizationProfileChange={setOrganizationProfile}
           />
         );
       case 'search':
-        return <SearchView />;
+        return <SearchView organizationProfile={organizationProfile} />;
       case 'workspace':
-        return <WorkspaceView />;
+        return <WorkspaceView organizationProfile={organizationProfile} />;
       default:
         return (
           <ProfileView
-            userDocuments={userDocuments}
+            organizationProfile={organizationProfile}
+            onOrganizationProfileChange={setOrganizationProfile}
           />
         );
     }
