@@ -1015,39 +1015,12 @@ Return as a plain string with tips separated by newlines (not JSON).`;
   return completion.choices[0]?.message?.content?.trim() ?? '';
 }
 
-/** Extract text from PDF using pdfjs-dist with DOM polyfills for serverless environments. */
+/** Extract text from PDF using unpdf (works in Node.js and serverless without DOM). */
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
-  // Polyfill DOM globals that pdfjs-dist expects (missing in Node/serverless)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const g = globalThis as any;
-  if (!g.DOMMatrix) {
-    g.DOMMatrix = class { a = 1; b = 0; c = 0; d = 1; e = 0; f = 0; isIdentity = true; is2D = true; };
-  }
-  if (!g.Path2D) {
-    g.Path2D = class {};
-  }
-  if (!g.ImageData) {
-    g.ImageData = class { width = 0; height = 0; data = new Uint8ClampedArray(0); };
-  }
-
-  const data = Uint8Array.from(buffer);
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  pdfjs.GlobalWorkerOptions.workerSrc = '';
-  const loadingTask = pdfjs.getDocument({ data, useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true });
-  const doc = await loadingTask.promise;
-  const numPages = doc.numPages;
-  const parts: string[] = [];
-  for (let i = 1; i <= numPages; i++) {
-    const page = await doc.getPage(i);
-    const textContent = await page.getTextContent();
-    const pageText = textContent.items
-      .map((item) => ('str' in item ? String(item.str ?? '') : ''))
-      .join(' ');
-    parts.push(pageText);
-    page.cleanup();
-  }
-  await doc.destroy();
-  return parts.join('\n\n');
+  const { extractText } = await import('unpdf');
+  const result = await extractText(new Uint8Array(buffer));
+  const text = result.text;
+  return Array.isArray(text) ? text.join('\n\n') : (text ?? '');
 }
 
 async function extractTextFromFile(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
