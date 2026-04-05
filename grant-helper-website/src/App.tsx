@@ -34,7 +34,7 @@ function App() {
   const [activeView, setActiveView] = useState('profile');
   const [organizationProfile, setOrganizationProfile] = useState('');
   const [profileReady, setProfileReady] = useState(() => !supabaseConfigured);
-  const [userDocuments, setUserDocuments] = useState<UserDocumentRow[]>([]);
+  const [_userDocuments, setUserDocuments] = useState<UserDocumentRow[]>([]);
 
   // useEffect(() => {
   //   if (typeof window === 'undefined') return;
