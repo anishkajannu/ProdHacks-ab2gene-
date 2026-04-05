@@ -18,8 +18,8 @@ const PROFILE_STORAGE_KEY = "grantflow.organizationProfile";
 const PROFILE_SUMMARY_STORAGE_KEY = "grantflow.profileSummary";
 const USER_ID_STORAGE_KEY = "grantflow.userId";
 const SAVED_DOCUMENTS_STORAGE_KEY = "grantflow.savedDocuments";
-const DEFAULT_PLATFORM_URL = "http://localhost:5173";
-const DEFAULT_BACKEND_URL = "http://localhost:3001";
+const DEFAULT_PLATFORM_URL = "https://grantflowab2gene.vercel.app";
+const DEFAULT_BACKEND_URL = "https://grantflowab2gene.vercel.app";
 
 let lastScanPayload = null;
 
@@ -44,6 +44,61 @@ function updateFlowState(options = {}) {
 
   autofillButton.disabled = !hasConnectedProfile;
   connectPlatformButton.textContent = hasConnectedProfile ? "Sync Again" : "Connect & Sync";
+}
+
+function toOrigin(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+}
+
+async function getSavedUrls() {
+  const saved = await chrome.storage.local.get([
+    PLATFORM_URL_STORAGE_KEY,
+    BACKEND_URL_STORAGE_KEY
+  ]);
+
+  return {
+    platformUrl: saved[PLATFORM_URL_STORAGE_KEY] || DEFAULT_PLATFORM_URL,
+    backendUrl: saved[BACKEND_URL_STORAGE_KEY] || ""
+  };
+}
+
+function isLikelyGrantFlowTab(tab) {
+  const url = String(tab?.url || "");
+  const title = String(tab?.title || "").toLowerCase();
+  if (!url) {
+    return false;
+  }
+
+  return (
+    title.includes("grantflow") ||
+    url.includes("grantflow") ||
+    url.includes("vercel.app") ||
+    url.includes("grantflowab2gene.vercel.app") ||
+    url.includes("localhost:5173")
+  );
+}
+
+async function resolvePlatformAndBackendUrls() {
+  const saved = await getSavedUrls();
+  const tabs = await chrome.tabs.query({});
+  const preferredTab = tabs.find((tab) => {
+    const origin = toOrigin(tab.url || "");
+    return origin && (origin === saved.platformUrl || isLikelyGrantFlowTab(tab));
+  });
+
+  const platformUrl = preferredTab?.url ? toOrigin(preferredTab.url) : saved.platformUrl || DEFAULT_PLATFORM_URL;
+  const backendUrl = saved.backendUrl || platformUrl || DEFAULT_BACKEND_URL;
+
+  await chrome.storage.local.set({
+    [PLATFORM_URL_STORAGE_KEY]: platformUrl,
+    [BACKEND_URL_STORAGE_KEY]: backendUrl
+  });
+
+  return { platformUrl, backendUrl };
 }
 
 function escapeHtml(value) {
@@ -544,19 +599,13 @@ async function syncStructuredProfile(backendUrl, profileText, userId) {
 }
 
 async function connectToPlatform() {
-  const platformUrl = DEFAULT_PLATFORM_URL;
-  const backendUrl = DEFAULT_BACKEND_URL;
+  const { platformUrl, backendUrl } = await resolvePlatformAndBackendUrls();
   const existing = await chrome.storage.local.get([
     PLATFORM_DOCUMENT_NAMES_STORAGE_KEY,
     PLATFORM_PROFILE_TEXT_STORAGE_KEY,
     PLATFORM_PROFILE_STORAGE_KEY,
     STRUCTURED_PROFILE_STORAGE_KEY
   ]);
-
-  await chrome.storage.local.set({
-    [PLATFORM_URL_STORAGE_KEY]: platformUrl,
-    [BACKEND_URL_STORAGE_KEY]: backendUrl
-  });
 
   const tab = await getPlatformTab(platformUrl);
   if (!tab?.id) {
@@ -1414,18 +1463,12 @@ async function requestAutofillAnswers(backendUrl, payload) {
 }
 
 async function autofillCurrentPage() {
-  const platformUrl = DEFAULT_PLATFORM_URL;
-  const backendUrl = DEFAULT_BACKEND_URL;
+  const { platformUrl, backendUrl } = await resolvePlatformAndBackendUrls();
 
   if (!backendUrl) {
     setStatus("Enter the backend URL first.");
     return;
   }
-
-  await chrome.storage.local.set({
-    [PLATFORM_URL_STORAGE_KEY]: platformUrl,
-    [BACKEND_URL_STORAGE_KEY]: backendUrl
-  });
 
   const saved = await chrome.storage.local.get([
     PLATFORM_PROFILE_STORAGE_KEY,
@@ -1582,7 +1625,13 @@ autofillButton.addEventListener("click", () => {
 });
 
 openPlatformButton.addEventListener("click", () => {
-  chrome.tabs.create({ url: DEFAULT_PLATFORM_URL });
+  resolvePlatformAndBackendUrls()
+    .then(({ platformUrl }) => {
+      chrome.tabs.create({ url: platformUrl || DEFAULT_PLATFORM_URL });
+    })
+    .catch(() => {
+      chrome.tabs.create({ url: DEFAULT_PLATFORM_URL });
+    });
 });
 
 connectPlatformButton.addEventListener("click", () => {
