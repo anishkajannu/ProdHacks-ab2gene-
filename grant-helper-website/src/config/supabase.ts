@@ -27,9 +27,12 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
  * Upload a file to Supabase Storage
  * @param file - File object to upload
  * @param userId - User ID (from auth.user())
- * @returns Storage path if successful
+ * @returns Row id (same UUID as storage segment) and storage path
  */
-export async function uploadToSupabase(file: File, userId: string): Promise<string> {
+export async function uploadToSupabase(
+  file: File,
+  userId: string
+): Promise<{ id: string; storagePath: string }> {
   const documentId = crypto.randomUUID();
   const storagePath = `${userId}/${documentId}/${file.name}`;
 
@@ -40,8 +43,9 @@ export async function uploadToSupabase(file: File, userId: string): Promise<stri
 
   if (uploadError) throw uploadError;
 
-  // Insert metadata into documents table
+  // Keep documents.id aligned with path segment so extract/chunk persist uses the same UUID
   const { error: dbError } = await supabase.from('documents').insert({
+    id: documentId,
     user_id: userId,
     filename: file.name,
     mime_type: file.type,
@@ -52,7 +56,7 @@ export async function uploadToSupabase(file: File, userId: string): Promise<stri
 
   if (dbError) throw dbError;
 
-  return storagePath;
+  return { id: documentId, storagePath };
 }
 
 /**
@@ -60,7 +64,7 @@ export async function uploadToSupabase(file: File, userId: string): Promise<stri
  * @param userId - User ID (from auth.user())
  * @returns Array of document metadata
  */
-export async function getUserDocuments(userId: string) {
+export async function getUserDocuments(userId: string): Promise<UserDocumentRow[]> {
   const { data, error } = await supabase
     .from('documents')
     .select('*')
@@ -68,8 +72,17 @@ export async function getUserDocuments(userId: string) {
     .order('created_at', { ascending: false });
 
   if (error) throw error;
-  return data;
+  return (data ?? []) as UserDocumentRow[];
 }
+
+export type UserDocumentRow = {
+  id: string;
+  filename: string;
+  mime_type: string | null;
+  file_size_bytes: number | null;
+  created_at: string;
+  status: string | null;
+};
 
 /**
  * Search user's document chunks (RAG retrieval)
@@ -121,4 +134,50 @@ export async function deleteDocument(documentId: string) {
     .eq('id', documentId);
 
   if (dbError) throw dbError;
+}
+
+export type OrganizationProfileRow = {
+  organization_name: string;
+  organization_profile: string;
+};
+
+export async function fetchOrganizationProfile(
+  userId: string
+): Promise<OrganizationProfileRow | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('organization_name, organization_profile')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+/** Ensures a row exists (e.g. if signup predates the org-profile migration). */
+export async function ensureOrganizationProfileRow(userId: string): Promise<void> {
+  const { data: existing } = await supabase
+    .from('profiles')
+    .select('id')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (existing) return;
+
+  const { error } = await supabase.from('profiles').insert({
+    id: userId,
+    organization_name: 'My organization',
+    organization_profile: '',
+  });
+
+  if (error && !/duplicate|unique/i.test(error.message)) throw error;
+}
+
+export async function saveOrganizationProfileText(userId: string, text: string): Promise<void> {
+  const { error } = await supabase
+    .from('profiles')
+    .update({ organization_profile: text })
+    .eq('id', userId);
+
+  if (error) throw error;
 }
